@@ -1,1 +1,1047 @@
+from html import escape
+from itertools import combinations
+from pathlib import Path
+import altair as alt
+import numpy as np
+import pandas as pd
+import streamlit as st
 
+# Configure the page layout to use wide mode for full width tables
+st.set_page_config(
+    page_title="Charleville LTC Padel: Oak & Harp Box League",
+    page_icon="🎾",
+    layout="wide",
+)
+
+# --- CUSTOM CSS FOR POLISHED UI ---
+st.markdown(
+    """
+    <style>
+        /* Custom Header Banner with Court Background Image */
+        .header-container {
+            background: linear-gradient(rgba(27, 77, 62, 0.88), rgba(46, 204, 113, 0.88)), 
+                        url('https://images.unsplash.com/photo-1709587825099-f6f07e5337af?q=80&w=3131&auto=format&fit=crop');
+            background-size: cover;
+            background-position: center;
+            padding: 2.5rem 2rem;
+            border-radius: 10px;
+            color: white;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .header-container h1 {
+            color: white !important;
+            margin-bottom: 0.2rem;
+        }
+        .header-container p {
+            color: #e8f5e9 !important;
+            font-size: 1.1rem;
+        }
+
+        /* Card Styling for Results - Adapts to Light/Dark Mode */
+        .result-card {
+            background-color: var(--secondary-background-color);
+            color: var(--text-color);
+            padding: 1rem 1.2rem;
+            border-radius: 8px;
+            border-left: 5px solid #2ecc71;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 0.8rem;
+            font-size: 1rem;
+        }
+        
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+@st.cache_data(ttl=60)
+def load_league_data(sheet_id, gid):
+    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    df = pd.read_csv(csv_url, skiprows=1)
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+
+    # Add spacing padding to the Team column values to force a wider column fit natively
+    if "Team" in df.columns:
+        df["Team"] = df["Team"].astype(str) + "    "
+        
+    return df
+
+@st.cache_data(ttl=60)
+def load_results_data(sheet_id, gid):
+    try:
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+        df = pd.read_csv(csv_url)
+        for column in list(df.columns):
+            header = " ".join(str(column).split()).lower()
+            if "winning team score" in header and "games" in header:
+                df.rename(columns={column: "Winning Team Score (Games Won)"}, inplace=True)
+            elif "losing team score" in header and "games" in header:
+                df.rename(columns={column: "Losing Team Score (Games Lost)"}, inplace=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+HARP_TEAMS = [
+    "Niall Behan & Eoin Meleady",
+    "Frankie Prendergast & Eoin Heffernan",
+    "Ronan O'Connor & David Cummins",
+    "Stephen Cassidy & Darragh Foran",
+    "Ed Donlon & Kevin Claffey",
+    "Conor Molloy & Robbie Bermingham",
+]
+
+OAK_TEAMS = [
+    "Mark Stynes & David Fitzgibbon",
+    "Ross Coghlan & Shane O'Brien",
+    "Matt Faherty & Conor Feeney",
+    "Padraig Byrne & Damien Carley",
+    "Fergal Conaghey & Graham Thew",
+    "Tadhg O'Loingsigh & Malachy O'Loingsigh",
+]
+
+
+def canonical_team_name(team):
+    return " ".join(str(team).replace("’", "'").replace("‘", "'").split())
+
+
+def display_team_name(team):
+    people = [person.strip() for person in team.split("&")]
+    initials = " & ".join(
+        f"{person.split()[0][0]}. {person.split()[-1]}" for person in people
+    )
+    return initials
+
+
+def build_league_table(results, teams, division_name):
+    stats = {
+        team: {
+            "Matches Played": 0,
+            "Matches Won": 0,
+            "Games Won": 0,
+            "Games Lost": 0,
+            "Bonus Points": 0,
+        }
+        for team in teams
+    }
+
+    required_columns = {
+        "Select your Box League Division",
+        "Winning Team",
+        "Losing Team",
+        "Winning Team Score (Games Won)",
+        "Losing Team Score (Games Lost)",
+    }
+    if not required_columns.issubset(results.columns):
+        standings = pd.DataFrame(stats).T.reset_index(names="Team")
+        standings["Total Points"] = 0
+        standings.insert(0, "Position", range(1, len(standings) + 1))
+        standings["Team"] = standings["Team"].map(display_team_name)
+        return standings[["Position", "Team", "Matches Played", "Matches Won", "Games Won", "Games Lost", "Bonus Points", "Total Points"]]
+
+    division_results = results[
+        results["Select your Box League Division"]
+        .astype("string")
+        .str.contains(division_name, case=False, na=False, regex=False)
+    ]
+    canonical_teams = {canonical_team_name(team): team for team in teams}
+
+    for _, result in division_results.iterrows():
+        winner = canonical_teams.get(canonical_team_name(result["Winning Team"]))
+        loser = canonical_teams.get(canonical_team_name(result["Losing Team"]))
+        if winner is None or loser is None:
+            continue
+        winning_games = pd.to_numeric(result["Winning Team Score (Games Won)"], errors="coerce")
+        losing_games = pd.to_numeric(result["Losing Team Score (Games Lost)"], errors="coerce")
+
+        if pd.isna(winning_games) or pd.isna(losing_games):
+            continue
+
+        stats[winner]["Matches Played"] += 1
+        stats[loser]["Matches Played"] += 1
+        stats[winner]["Games Won"] += winning_games
+        stats[loser]["Games Won"] += losing_games
+        stats[winner]["Games Lost"] += losing_games
+        stats[loser]["Games Lost"] += winning_games
+
+        if winning_games > losing_games:
+            stats[winner]["Matches Won"] += 1
+            stats[winner]["Bonus Points"] += 2
+        elif winning_games == losing_games:
+            stats[winner]["Bonus Points"] += 1
+            stats[loser]["Bonus Points"] += 1
+        else:
+            stats[loser]["Matches Won"] += 1
+            stats[loser]["Bonus Points"] += 2
+
+    standings = pd.DataFrame(stats).T.reset_index(names="Team")
+    standings["Total Points"] = standings["Games Won"] + standings["Bonus Points"]
+    standings = standings.sort_values(
+        ["Total Points", "Games Won", "Team"], ascending=[False, False, True], kind="stable"
+    ).reset_index(drop=True)
+    standings.insert(0, "Position", standings.index + 1)
+    standings["Team"] = standings["Team"].map(display_team_name)
+    return standings[["Position", "Team", "Matches Played", "Matches Won", "Games Won", "Games Lost", "Bonus Points", "Total Points"]]
+
+def sort_results_newest_first(results):
+    if "Date of Match" not in results.columns:
+        return results
+
+    return (
+        results.assign(_match_date=pd.to_datetime(results["Date of Match"], dayfirst=True, errors="coerce"))
+        .sort_values("_match_date", ascending=False, na_position="last", kind="stable")
+        .drop(columns="_match_date")
+    )
+
+def filter_results_by_team(results, division_data, key):
+    if "Team" not in division_data.columns or not {"Winning Team", "Losing Team"}.issubset(results.columns):
+        return results, "All"
+
+    teams = (
+        division_data["Team"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    teams = teams[teams.ne("")].drop_duplicates().tolist()
+    selected_team = st.selectbox("Filter results by team", ["All", *teams], key=key)
+
+    if selected_team != "All":
+        winners = results["Winning Team"].fillna("").astype(str).str.strip()
+        losers = results["Losing Team"].fillna("").astype(str).str.strip()
+        results = results[winners.eq(selected_team) | losers.eq(selected_team)]
+
+    return results, selected_team
+
+def parse_news_posts(news_markdown):
+    posts = []
+    current_title = None
+    current_body = []
+
+    for line in news_markdown.splitlines():
+        if line.startswith("## "):
+            if current_title:
+                posts.append((current_title, "\n".join(current_body).strip()))
+            current_title = line[3:].strip()
+            current_body = []
+        elif current_title:
+            current_body.append(line)
+
+    if current_title:
+        posts.append((current_title, "\n".join(current_body).strip()))
+
+    return posts
+
+def estimate_playoff_probabilities(standings, results, division_name, simulations=10_000):
+    if "Team" not in standings.columns:
+        return pd.DataFrame(columns=["Team", "Playoff probability"])
+
+    teams = standings["Team"].dropna().astype(str).str.strip()
+    teams = list(dict.fromkeys(team for team in teams if team))
+    team_count = len(teams)
+    if not team_count:
+        return pd.DataFrame(columns=["Team", "Playoff probability"])
+
+    team_indexes = {team: index for index, team in enumerate(teams)}
+    if "Total Points" in standings.columns:
+        points_by_team = (
+            standings.assign(_team=standings["Team"].astype(str).str.strip())
+            .drop_duplicates("_team")
+            .set_index("_team")["Total Points"]
+        )
+        current_points = pd.to_numeric(points_by_team.reindex(teams), errors="coerce").fillna(0).to_numpy()
+    else:
+        current_points = np.zeros(team_count)
+
+    columns = {
+        "Select your Box League Division",
+        "Winning Team",
+        "Losing Team",
+        "Winning Team Score (Games won)",
+        "Losing Team Score (Games won)",
+    }
+    valid_results = pd.DataFrame()
+    if columns.issubset(results.columns):
+        valid_results = results[
+            results["Select your Box League Division"]
+            .astype("string")
+            .str.contains(division_name, case=False, na=False, regex=False)
+        ].copy()
+        valid_results["_winner"] = valid_results["Winning Team"].astype("string").str.strip()
+        valid_results["_loser"] = valid_results["Losing Team"].astype("string").str.strip()
+        valid_results["_winning_games"] = pd.to_numeric(
+            valid_results["Winning Team Score (Games won)"], errors="coerce"
+        )
+        valid_results["_losing_games"] = pd.to_numeric(
+            valid_results["Losing Team Score (Games won)"], errors="coerce"
+        )
+        valid_results = valid_results[
+            valid_results["_winner"].isin(teams)
+            & valid_results["_loser"].isin(teams)
+            & valid_results["_winner"].ne(valid_results["_loser"])
+            & valid_results["_winning_games"].ge(0)
+            & valid_results["_losing_games"].ge(0)
+        ]
+
+    games_won = np.zeros(team_count)
+    games_played = np.zeros(team_count)
+    played_pairings = set()
+    for _, match in valid_results.iterrows():
+        winner = team_indexes[match["_winner"]]
+        loser = team_indexes[match["_loser"]]
+        winner_games = match["_winning_games"]
+        loser_games = match["_losing_games"]
+        if pd.isna(winner_games) or pd.isna(loser_games):
+            continue
+        games_won[winner] += winner_games
+        games_won[loser] += loser_games
+        games_played[winner] += winner_games + loser_games
+        games_played[loser] += winner_games + loser_games
+        played_pairings.add(frozenset((winner, loser)))
+
+    # Smooth small samples toward an even game split; unplayed teams start at 50%.
+    game_win_rates = (games_won + 8.5) / (games_played + 17)
+    rng = np.random.default_rng(20261012 if division_name == "Harp" else 20261013)
+    final_points = np.tile(current_points, (simulations, 1))
+
+    for team_a, team_b in combinations(range(team_count), 2):
+        if frozenset((team_a, team_b)) in played_pairings:
+            continue
+
+        probability_a_wins_game = game_win_rates[team_a] / (
+            game_win_rates[team_a] + game_win_rates[team_b]
+        )
+        games_a = rng.binomial(17, probability_a_wins_game, size=simulations)
+        games_b = 17 - games_a
+        final_points[:, team_a] += games_a + (games_a > games_b) * 2
+        final_points[:, team_b] += games_b + (games_b > games_a) * 2
+
+    playoff_slots = min(2, team_count)
+    cutoff = np.partition(final_points, -playoff_slots, axis=1)[:, -playoff_slots]
+    above_cutoff = final_points > cutoff[:, np.newaxis]
+    tied_at_cutoff = final_points == cutoff[:, np.newaxis]
+    slots_left = playoff_slots - above_cutoff.sum(axis=1)
+    tie_count = tied_at_cutoff.sum(axis=1)
+    playoff_shares = above_cutoff + tied_at_cutoff * (
+        slots_left / tie_count
+    )[:, np.newaxis]
+    probabilities = playoff_shares.mean(axis=0)
+
+    return (
+        pd.DataFrame({"Team": teams, "Playoff probability": probabilities})
+        .sort_values("Playoff probability", ascending=False, kind="stable")
+        .reset_index(drop=True)
+    )
+
+def estimate_fixture_completion(harp_standings, oak_standings, results, as_of=None):
+    start_date = pd.Timestamp("2026-10-05")
+    deadline = pd.Timestamp("2026-11-08")
+    as_of = pd.Timestamp.today().normalize() if as_of is None else pd.Timestamp(as_of).normalize()
+    division_standings = {
+        "Harp": harp_standings,
+        "Oak": oak_standings,
+    }
+    required_columns = {
+        "Date of Match",
+        "Select your Box League Division",
+        "Winning Team",
+        "Losing Team",
+        "Winning Team Score (Games won)",
+        "Losing Team Score (Games won)",
+    }
+    if not required_columns.issubset(results.columns):
+        return None
+
+    teams_by_division = {}
+    possible_pairings = 0
+    for division, standings in division_standings.items():
+        if "Team" not in standings.columns:
+            return None
+        teams = standings["Team"].dropna().astype(str).str.strip()
+        teams = list(dict.fromkeys(team for team in teams if team))
+        if not teams:
+            return None
+        teams_by_division[division] = set(teams)
+        possible_pairings += len(teams) * (len(teams) - 1) // 2
+
+    matches = results.copy()
+    matches["_division"] = matches["Select your Box League Division"].astype("string")
+    matches["_date"] = pd.to_datetime(
+        matches["Date of Match"], dayfirst=True, errors="coerce"
+    )
+    matches["_winner"] = matches["Winning Team"].astype("string").str.strip()
+    matches["_loser"] = matches["Losing Team"].astype("string").str.strip()
+    matches["_winning_games"] = pd.to_numeric(
+        matches["Winning Team Score (Games won)"], errors="coerce"
+    )
+    matches["_losing_games"] = pd.to_numeric(
+        matches["Losing Team Score (Games won)"], errors="coerce"
+    )
+    matches["_division_name"] = matches["_division"].map(
+        lambda value: next(
+            (
+                division for division in teams_by_division
+                if pd.notna(value) and division.lower() in value.lower()
+            ),
+            None,
+        )
+    )
+    matches = matches[
+        matches["_division_name"].notna()
+        & matches.apply(
+            lambda row: (
+                row["_winner"] in teams_by_division[row["_division_name"]]
+                and row["_loser"] in teams_by_division[row["_division_name"]]
+            ),
+            axis=1,
+        )
+        & matches["_winner"].ne(matches["_loser"])
+        & matches["_winning_games"].ge(0)
+        & matches["_losing_games"].ge(0)
+        & (matches["_date"].isna() | matches["_date"].le(as_of))
+    ].copy()
+    matches["_pairing"] = matches.apply(
+        lambda row: (
+            row["_division_name"],
+            frozenset((row["_winner"], row["_loser"])),
+        ),
+        axis=1,
+    )
+    completed_pairings = set(matches["_pairing"])
+    remaining = max(possible_pairings - len(completed_pairings), 0)
+
+    elapsed_days = max((as_of - start_date).days, 0)
+    forecast_days = max((deadline - as_of).days, 0)
+    dated_pairings = matches[
+        matches["_date"].ge(start_date)
+        & matches["_date"].le(as_of)
+    ].sort_values("_date").drop_duplicates("_pairing")
+    completed_per_day = len(dated_pairings) / elapsed_days if elapsed_days else 0
+    expected_fixtures = completed_per_day * forecast_days
+
+    if remaining == 0:
+        probability = 1.0
+    elif elapsed_days == 0 or forecast_days == 0:
+        probability = 0.0
+    else:
+        probability_below_needed = np.exp(-expected_fixtures)
+        term = probability_below_needed
+        for count in range(1, remaining):
+            term *= expected_fixtures / count
+            probability_below_needed += term
+        probability = float(np.clip(1 - probability_below_needed, 0, 1))
+
+    return {
+        "deadline": deadline,
+        "possible": possible_pairings,
+        "completed": len(completed_pairings),
+        "remaining": remaining,
+        "fixtures_per_week": completed_per_day * 7,
+        "expected_by_deadline": expected_fixtures,
+        "probability": probability,
+    }
+
+def build_advanced_stats(harp_standings, oak_standings, results):
+    start_date = pd.Timestamp("2026-10-05")
+    today = pd.Timestamp.today().normalize()
+    current_week_start = today - pd.Timedelta(days=today.weekday())
+    week_starts = pd.date_range(
+        start=start_date,
+        end=current_week_start - pd.Timedelta(days=7),
+        freq="W-MON",
+    )
+    division_standings = {
+        "Harp": harp_standings,
+        "Oak": oak_standings,
+    }
+    required_columns = {
+        "Select your Box League Division",
+        "Winning Team",
+        "Losing Team",
+        "Winning Team Score (Games won)",
+        "Losing Team Score (Games won)",
+    }
+    matches_by_division = {}
+
+    if required_columns.issubset(results.columns):
+        for division, standings in division_standings.items():
+            if "Team" not in standings.columns:
+                matches_by_division[division] = pd.DataFrame()
+                continue
+
+            teams = standings["Team"].dropna().astype(str).str.strip()
+            teams = {team for team in teams if team}
+            division_results = results[
+                results["Select your Box League Division"]
+                .astype("string")
+                .str.contains(division, case=False, na=False, regex=False)
+            ].copy()
+            division_results["_winner"] = division_results["Winning Team"].astype("string").str.strip()
+            division_results["_loser"] = division_results["Losing Team"].astype("string").str.strip()
+            division_results["_winning_games"] = pd.to_numeric(
+                division_results["Winning Team Score (Games won)"], errors="coerce"
+            )
+            division_results["_losing_games"] = pd.to_numeric(
+                division_results["Losing Team Score (Games won)"], errors="coerce"
+            )
+            division_results = division_results[
+                division_results["_winner"].isin(teams)
+                & division_results["_loser"].isin(teams)
+                & division_results["_winning_games"].notna()
+                & division_results["_losing_games"].notna()
+            ].copy()
+            division_results["_margin"] = (
+                division_results["_winning_games"] - division_results["_losing_games"]
+            )
+            division_results["_match_date"] = pd.to_datetime(
+                division_results["Date of Match"], dayfirst=True, errors="coerce"
+            ) if "Date of Match" in division_results.columns else pd.NaT
+            matches_by_division[division] = division_results
+
+    else:
+        matches_by_division = {division: pd.DataFrame() for division in division_standings}
+
+    margin_rows = []
+    weekly_match_averages = {}
+    completion_rows = []
+    total_completed_pairings = 0
+    total_possible_pairings = 0
+    total_margins = []
+
+    for division, standings in division_standings.items():
+        division_matches = matches_by_division[division]
+        margins = division_matches["_margin"] if "_margin" in division_matches else pd.Series(dtype=float)
+        total_margins.extend(margins.tolist())
+        margin_rows.append({
+            "Division": division,
+            "Average winning margin (games)": margins.mean(),
+        })
+
+        if not division_matches.empty:
+            weekly_matches = division_matches[
+                division_matches["_match_date"].ge(start_date)
+                & division_matches["_match_date"].lt(current_week_start)
+            ].copy()
+            if not weekly_matches.empty:
+                weekly_matches["_week"] = (
+                    weekly_matches["_match_date"].dt.to_period("W-SUN").dt.start_time
+                )
+                weekly_counts = weekly_matches.groupby("_week").size()
+            else:
+                weekly_counts = pd.Series(dtype=int)
+        else:
+            weekly_counts = pd.Series(dtype=int)
+        weekly_match_averages[division] = (
+            weekly_counts.reindex(week_starts, fill_value=0).sum() / len(week_starts)
+            if len(week_starts)
+            else float("nan")
+        )
+
+        if "Team" in standings.columns:
+            teams = standings["Team"].dropna().astype(str).str.strip()
+            teams = {team for team in teams if team}
+            possible_pairings = len(teams) * (len(teams) - 1) // 2
+        else:
+            teams = set()
+            possible_pairings = 0
+
+        completed_pairings = set()
+        if not division_matches.empty:
+            completed_pairings = {
+                frozenset((row["_winner"], row["_loser"]))
+                for _, row in division_matches.iterrows()
+                if row["_winner"] != row["_loser"]
+            }
+        completed_count = len(completed_pairings)
+        total_completed_pairings += completed_count
+        total_possible_pairings += possible_pairings
+        completion_rows.append({
+            "Division": division,
+            "Games played (%)": (
+                completed_count / possible_pairings * 100 if possible_pairings else 0
+            ),
+        })
+
+    margin_rows.append({
+        "Division": "Overall",
+        "Average winning margin (games)": (
+            sum(total_margins) / len(total_margins) if total_margins else float("nan")
+        ),
+    })
+    weekly_match_averages["Overall"] = (
+        weekly_match_averages["Harp"] + weekly_match_averages["Oak"]
+    )
+    completion_rows.append({
+        "Division": "Overall",
+        "Games played (%)": (
+            total_completed_pairings / total_possible_pairings * 100
+            if total_possible_pairings else 0
+        ),
+    })
+
+    return {
+        "average_margin": pd.DataFrame(margin_rows).set_index("Division"),
+        "average_matches_per_week": pd.DataFrame.from_dict(
+            weekly_match_averages, orient="index", columns=["Average matches per week"]
+        ).rename_axis("Division"),
+        "completion": pd.DataFrame(completion_rows).set_index("Division"),
+    }
+
+def division_bar_chart(data, value_column, y_title, value_format, suffix=""):
+    division_order = ["Harp", "Oak", "Overall"]
+    chart_data = data.reindex(division_order).reset_index()
+    chart_data["Label"] = chart_data[value_column].map(
+        lambda value: f"{value:.1f}{suffix}" if pd.notna(value) else "N/A"
+    )
+
+    bars = alt.Chart(chart_data).mark_bar().encode(
+        x=alt.X("Division:N", sort=division_order, title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y(f"{value_column}:Q", title=y_title),
+        color=alt.Color(
+            "Division:N",
+            scale=alt.Scale(
+                domain=division_order,
+                range=["#2ecc71", "#1b4d3e", "#808080"],
+            ),
+            legend=None,
+        ),
+        tooltip=[
+            alt.Tooltip("Division:N"),
+            alt.Tooltip(f"{value_column}:Q", title=y_title, format=value_format),
+        ],
+    )
+    labels = alt.Chart(chart_data).mark_text(dy=-8).encode(
+        x=alt.X("Division:N", sort=division_order),
+        y=alt.Y(f"{value_column}:Q"),
+        text=alt.Text("Label:N"),
+    )
+    return (bars + labels).properties(height=320)
+
+def build_position_history(standings, results, division_name):
+    columns = {"Date of Match", "Select your Box League Division",
+               "Winning Team", "Losing Team",
+               "Winning Team Score (Games won)", "Losing Team Score (Games won)"}
+    history_columns = ["Date", "Team", "Position"]
+    if "Team" not in standings.columns or not columns.issubset(results.columns):
+        return pd.DataFrame(columns=history_columns)
+
+    teams = standings["Team"].dropna().astype(str).str.strip()
+    teams = list(dict.fromkeys(team for team in teams if team))
+    if not teams:
+        return pd.DataFrame(columns=history_columns)
+
+    matches = results[
+        results["Select your Box League Division"]
+        .astype("string")
+        .str.contains(division_name, case=False, na=False, regex=False)
+    ].copy()
+    matches["_match_date"] = pd.to_datetime(
+        matches["Date of Match"], dayfirst=True, errors="coerce"
+    )
+    matches["_winner"] = matches["Winning Team"].astype("string").str.strip()
+    matches["_loser"] = matches["Losing Team"].astype("string").str.strip()
+    matches["_winning_games"] = pd.to_numeric(
+        matches["Winning Team Score (Games won)"], errors="coerce"
+    )
+    matches["_losing_games"] = pd.to_numeric(
+        matches["Losing Team Score (Games won)"], errors="coerce"
+    )
+    matches = matches[
+        matches["_match_date"].notna()
+        & matches["_winner"].isin(teams)
+        & matches["_loser"].isin(teams)
+        & matches["_winner"].ne(matches["_loser"])
+        & matches["_winning_games"].ge(0)
+        & matches["_losing_games"].ge(0)
+    ].sort_values("_match_date", kind="stable")
+    if matches.empty:
+        return pd.DataFrame(columns=history_columns)
+
+    points = dict.fromkeys(teams, 0)
+    history = []
+    for match_date, dated_matches in matches.groupby("_match_date", sort=True):
+        for _, match in dated_matches.iterrows():
+            winner, loser = match["_winner"], match["_loser"]
+            winning_games, losing_games = match["_winning_games"], match["_losing_games"]
+            points[winner] += winning_games
+            points[loser] += losing_games
+            if winning_games > losing_games:
+                points[winner] += 2
+            elif winning_games < losing_games:
+                points[loser] += 2
+            else:
+                points[winner] += 1
+                points[loser] += 1
+
+        positions = pd.Series(points).rank(method="min", ascending=False)
+        history.extend(
+            {"Date": match_date, "Team": team, "Position": positions[team]}
+            for team in teams
+        )
+
+    return pd.DataFrame(history, columns=history_columns)
+
+def team_position_chart(history):
+    team_count = history["Team"].nunique()
+    chart_data = history.copy()
+    chart_data["Team initials"] = chart_data["Team"].map(
+        lambda team: " & ".join(
+            "".join(part[0] for part in person.split() if part)
+            for person in team.split("&")
+        )
+    )
+    return alt.Chart(chart_data).mark_line(
+        point=True, interpolate="linear"
+    ).encode(
+        x=alt.X("Date:T", title="Match date"),
+        y=alt.Y(
+            "Position:Q",
+            title="Position",
+            scale=alt.Scale(reverse=True, domain=[1, team_count]),
+            axis=alt.Axis(values=list(range(1, team_count + 1)), format="d"),
+        ),
+        color=alt.Color(
+            "Team initials:N",
+            legend=alt.Legend(
+                title="Team",
+                orient="bottom",
+                direction="horizontal",
+                columns=3,
+                symbolLimit=0,
+                labelLimit=0,
+            ),
+        ),
+        detail="Team:N",
+        order="Date:T",
+        tooltip=[
+            alt.Tooltip("Date:T", title="Date"),
+            alt.Tooltip("Team:N"),
+            alt.Tooltip("Position:Q", format=".0f"),
+        ],
+    ).properties(height=360)
+
+def build_head_to_head_table(division_data, results_data, division_name):
+    full_teams = HARP_TEAMS if division_name == "Harp" else OAK_TEAMS
+    teams = [display_team_name(team) for team in full_teams]
+    canonical_teams = {canonical_team_name(team): team for team in full_teams}
+    display_names = {
+        canonical_team_name(team): display_team_name(team) for team in full_teams
+    }
+    table = pd.DataFrame("—", index=teams, columns=teams, dtype=object)
+    table.index.name = "Pairing"
+
+    required_columns = {
+        "Select your Box League Division",
+        "Winning Team",
+        "Losing Team",
+        "Winning Team Score (Games Won)",
+        "Losing Team Score (Games Lost)",
+    }
+    if not required_columns.issubset(results_data.columns):
+        return table
+
+    division_results = results_data[
+        results_data["Select your Box League Division"]
+        .astype("string")
+        .str.contains(division_name, case=False, na=False, regex=False)
+    ]
+    match_results = {}
+
+    for _, result in division_results.iterrows():
+        winner_full = canonical_teams.get(canonical_team_name(result["Winning Team"]))
+        loser_full = canonical_teams.get(canonical_team_name(result["Losing Team"]))
+        if winner_full is None or loser_full is None:
+            continue
+
+        winner_key = canonical_team_name(winner_full)
+        loser_key = canonical_team_name(loser_full)
+        winner = display_names[winner_key]
+        loser = display_names[loser_key]
+        winning_score = result["Winning Team Score (Games Won)"]
+        losing_score = result["Losing Team Score (Games Lost)"]
+        winning_score = "" if pd.isna(winning_score) else str(winning_score).strip()
+        losing_score = "" if pd.isna(losing_score) else str(losing_score).strip()
+
+        match_results.setdefault((winner, loser), []).append(f"W {winning_score}-{losing_score}")
+        match_results.setdefault((loser, winner), []).append(f"L {losing_score}-{winning_score}")
+
+    for (team, opponent), results in match_results.items():
+        table.at[team, opponent] = "; ".join(results)
+
+    return table
+
+def style_head_to_head_table(table):
+    def team_label(team):
+        return escape(str(team), quote=True).replace("&amp;", "&amp;<br>")
+
+    table_header_style = (
+        "padding: 0.5rem; text-align: left; vertical-align: top; "
+        "border: 1px solid rgba(128, 128, 128, 0.25); "
+        "background-color: rgba(128, 128, 128, 0.08);"
+    )
+    cell_style = "padding: 0.5rem; border: 1px solid rgba(128, 128, 128, 0.25);"
+    headers = "".join(
+        f'<th style="{table_header_style}">{team_label(team)}</th>'
+        for team in table.columns
+    )
+    rows = []
+    for team, values in table.iterrows():
+        cells = []
+        for opponent, value in values.items():
+            background = (
+                "background-color: rgba(128, 128, 128, 0.35);"
+                if team == opponent
+                else ""
+            )
+            cells.append(
+                f'<td style="{cell_style} {background}">{escape(str(value), quote=True)}</td>'
+            )
+        rows.append(
+            f'<tr><th style="{table_header_style}">{team_label(team)}</th>{"".join(cells)}</tr>'
+        )
+
+    return (
+        '<div style="overflow-x: auto;"><table style="width: 100%; '
+        'border-collapse: collapse; font-size: 0.85rem;">'
+        f'<thead><tr><th style="{table_header_style}">Pairing</th>{headers}</tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table></div>'
+    )
+
+def team_at_position(standings, position):
+    if "Position" not in standings.columns or "Team" not in standings.columns:
+        return "TBD"
+
+    positions = pd.to_numeric(standings["Position"], errors="coerce")
+    teams = standings.loc[positions == position, "Team"]
+    if teams.empty or pd.isna(teams.iloc[0]) or not str(teams.iloc[0]).strip():
+        return "TBD"
+
+    return str(teams.iloc[0]).strip()
+
+# Styling function to highlight top 2 playoff spots & shade Total Points column safely for themes
+def style_league_table(df):
+    def apply_styles(row):
+        styles = [''] * len(row)
+        try:
+            pos = int(row.iloc[0])
+            if pos <= 2:
+                for i in range(len(row)):
+                    styles[i] = 'background-color: rgba(46, 204, 113, 0.25); font-weight: bold;'
+        except Exception:
+            pass
+        return styles
+
+    styled = df.style.apply(apply_styles, axis=1)
+    
+    # Shade the 'Total Points' column using Streamlit conditional / neutral fallback colors
+    if "Total Points" in df.columns:
+        styled = styled.set_properties(
+            subset=["Total Points"], 
+            props="background-color: rgba(128, 128, 128, 0.2); font-weight: bold;"
+        )
+        
+    return styled
+
+# Styled Header Banner
+st.markdown(
+    """
+    <div class="header-container">
+        <h1>Charleville LTC Padel: Oak & Harp Box League</h1>
+        <p>Live standings, results, and official league rules.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+try:
+    sheet_id = st.secrets["sheet_id"]
+    results_id = st.secrets["results_id"]
+    results_df = load_results_data(sheet_id, results_id)
+    harp_df = build_league_table(results_df, HARP_TEAMS, "Harp")
+    oak_df = build_league_table(results_df, OAK_TEAMS, "Oak")
+
+    # Create top-level tabs
+    tab_harp, tab_oak, tab_playoffs, tab_rules = st.tabs([
+        "🎻 Harp Division", 
+        "🌳 Oak Division",
+        "🏆 Playoffs",
+         "📖 League Rules"
+    ])
+
+    with tab_harp:
+        st.subheader("Harp Division Standings")
+        st.markdown("*(Top 2 teams qualify for the semi-finals!)*")
+        st.dataframe(
+            style_league_table(harp_df), 
+            use_container_width=True, 
+            hide_index=True
+        )
+        
+        st.markdown("---")
+        st.subheader("🏆 Harp Division Results")
+        if not results_df.empty and "Select your Box League Division" in results_df.columns:
+            em_results = sort_results_newest_first(
+                results_df[results_df["Select your Box League Division"].str.contains("Harp", na=False)]
+            )
+            if not em_results.empty:
+                em_results, selected_team = filter_results_by_team(
+                    em_results, harp_df, "harp_results_team_filter"
+                )
+                if not em_results.empty:
+                    with st.container(height=270):
+                        for _, row in em_results.iterrows():
+                            winner = row.get("Winning Team", "")
+                            loser = row.get("Losing Team", "")
+                            w_score = row.get("Winning Team Score (Games Won)", "")
+                            l_score = row.get("Losing Team Score (Games Lost)", "")
+                            date = row.get("Date of Match", "")
+                            st.markdown(
+                                f"""
+                                <div class="result-card">
+                                    📅 <b>{date}</b> &nbsp;|&nbsp; 🏆 <b>{winner}</b> ({w_score}) vs. {loser} ({l_score})
+                                </div>
+                                """,
+                                unsafe_allow_html=True
+                            )
+                else:
+                    st.info(f"No results found for {selected_team}.")
+            else:
+                st.info("No results recorded for the Harp Division yet.")
+        else:
+            st.info("No results recorded yet.")
+
+        st.markdown("---")
+        st.subheader("Harp Division Head-to-Head Results")
+        st.caption("Each cell shows the row pairing's results against the column pairing. Grey cells are self-matchups.")
+        harp_head_to_head = build_head_to_head_table(harp_df, results_df, "Harp")
+        if harp_head_to_head.empty:
+            st.info("Pairing data is not available for the Harp Division.")
+        else:
+            st.markdown(
+                style_head_to_head_table(harp_head_to_head),
+                unsafe_allow_html=True,
+            )
+
+    with tab_oak:
+        if Path("oak_logo.png").exists():
+            st.image("oak_logo.png", width=120)
+            
+        st.subheader("Oak Division Standings")
+        st.markdown("*(Top 2 teams qualify for the semi-finals!)*")
+        st.dataframe(
+            style_league_table(oak_df), 
+            use_container_width=True, 
+            hide_index=True,
+        )
+        
+        st.markdown("---")
+        st.subheader("🏆 Oak Division Results")
+        if not results_df.empty and "Select your Box League Division" in results_df.columns:
+            sh_results = sort_results_newest_first(
+                results_df[results_df["Select your Box League Division"].str.contains("Oak", na=False)]
+            )
+            if not sh_results.empty:
+                sh_results, selected_team = filter_results_by_team(
+                    sh_results, oak_df, "oak_results_team_filter"
+                )
+                if not sh_results.empty:
+                    with st.container(height=270):
+                        for _, row in sh_results.iterrows():
+                            winner = row.get("Winning Team", "")
+                            loser = row.get("Losing Team", "")
+                            w_score = row.get("Winning Team Score (Games Won)", "")
+                            l_score = row.get("Losing Team Score (Games Lost)", "")
+                            date = row.get("Date of Match", "")
+                            st.markdown(
+                                f"""
+                                <div class="result-card">
+                                    📅 <b>{date}</b> &nbsp;|&nbsp; 🏆 <b>{winner}</b> ({w_score}) vs. {loser} ({l_score})
+                                </div>
+                                """,
+                                unsafe_allow_html=True
+                            )
+                else:
+                    st.info(f"No results found for {selected_team}.")
+            else:
+                st.info("No results recorded for the Oak Division yet.")
+        else:
+            st.info("No results recorded yet.")
+
+        st.markdown("---")
+        st.subheader("Oak Division Head-to-Head Results")
+        st.caption("Each cell shows the row pairing's results against the column pairing. Grey cells are self-matchups.")
+        oak_head_to_head = build_head_to_head_table(oak_df, results_df, "Oak")
+        if oak_head_to_head.empty:
+            st.info("Pairing data is not available for the Oak Division.")
+        else:
+            st.markdown(
+                style_head_to_head_table(oak_head_to_head),
+                unsafe_allow_html=True,
+            )
+
+    with tab_playoffs:
+        st.subheader("Semi-final & Final Bracket")
+        st.caption("Projected from the current division standings. Qualifiers update as standings change.")
+
+        harp_first = team_at_position(harp_df, 1)
+        harp_second = team_at_position(harp_df, 2)
+        oak_first = team_at_position(oak_df, 1)
+        oak_second = team_at_position(oak_df, 2)
+
+        semi_finals, final = st.columns(2)
+        with semi_finals:
+            st.markdown("### Semi-finals")
+            with st.container(border=True):
+                st.caption("Semi-final 1 · 2nd Harp vs 1st Oak")
+                st.write(harp_second)
+                st.markdown("**vs**")
+                st.write(oak_first)
+            with st.container(border=True):
+                st.caption("Semi-final 2 · 1st Harp vs 2nd Oak")
+                st.write(harp_first)
+                st.markdown("**vs**")
+                st.write(oak_second)
+
+        with final:
+            st.markdown("### Final")
+            with st.container(border=True):
+                st.caption("Winner of Semi-final 1")
+                st.write("Winner of Semi-final 1")
+                st.markdown("**vs**")
+                st.caption("Winner of Semi-final 2")
+                st.write("Winner of Semi-final 2")
+                st.divider()
+                st.write("🏆 Champion: TBD")
+
+    with tab_rules:
+        st.subheader("Charleville LTC Padel Box League Rules")
+        try:
+            with open("rules.md", "r", encoding="utf-8") as f:
+                rules_markdown = f.read()
+            st.markdown(rules_markdown)
+        except FileNotFoundError:
+            st.error("rules.md file not found. Please create it in your project root.")
+
+except KeyError as e:
+    st.error(f"Missing Streamlit secret: {e.args[0]}")
+    st.info("Add sheet_id and results_id under Streamlit Settings > Secrets, then restart the app.")
+except Exception as e:
+    st.error(f"Could not load league tables: {e}")
+    st.info("Ensure that your Google Sheet is shared with 'Anyone with the link can view'.")
+
+# Direct MP4 link from Giphy's CDN for this sticker
+giphy_mp4_url = "https://media.giphy.com/media/j0YrtFmQoUs2u2Lgv3/giphy.mp4"
+
+# HTML5 video embed configured for background/sticker looping
+video_html = f"""
+    <div style="display: flex; justify-content: center; box-shadow: none;">
+        <video width="250" autoplay loop muted playsinline style="background: transparent; box-shadow: none; border: none; outline: none; filter: none;">
+            <source src="{giphy_mp4_url}" type="video/mp4">
+            Your browser does not support the video tag.
+        </video>
+    </div>
+"""
+
+st.markdown(video_html, unsafe_allow_html=True)
